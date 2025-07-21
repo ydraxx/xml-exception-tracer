@@ -72,7 +72,7 @@ def main():
 
     xml_path = Path(args.xml_file)
     if not xml_path.exists():
-        print(f"[❌] File not found: {xml_path}")
+        print(f"File not found: {xml_path}")
         return
 
     result = parse_workflow_with_groups(xml_path)
