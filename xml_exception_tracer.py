@@ -104,26 +104,19 @@ def extract_exceptions_and_paths_from_graph(graph, xml_file):
     exceptions_data = []
 
     def find_path_with_labels(graph, start, end):
-        def get_path(source, target, visited, path):
-            visited[source] = True
-            path.append(source)
+    try:
+        path_nodes = nx.shortest_path(graph, source=start, target=end)
+    except nx.NetworkXNoPath:
+        return None
 
-            if source == target:
-                return True
-
-            for neighbor, data in graph[source].items():
-                if not visited[neighbor]:
-                    if get_path(neighbor, target, visited, path):
-                        return True
-
-            path.pop()
-            visited[source] = False
-            return False
-
-        visited = {node: False for node in graph.nodes}
-        path = []
-        get_path(start, end, visited, path)
-        return " -> ".join(path) if path else None
+    steps = []
+    for i in range(len(path_nodes) - 1):
+        src = path_nodes[i]
+        dst = path_nodes[i + 1]
+        edge_data = graph.get_edge_data(src, dst)
+        label = edge_data["label"] if edge_data and "label" in edge_data else ""
+        steps.append(f"{src} --[{label}]--> {dst}")
+    return " -> ".join(steps)
 
 
     for condition in root.findall(".//condition"):
