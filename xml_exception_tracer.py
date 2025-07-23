@@ -1,82 +1,177 @@
 import xml.etree.ElementTree as ET
 import networkx as nx
-import argparse
-from pathlib import Path
-from pprint import pprint
 
-def parse_workflow_with_groups(xml_file_path):
-    tree = ET.parse(xml_file_path)
-    root = tree.getroot()
+def build_workflow_graph(xml_file):
 
-    graph = nx.DiGraph()
-    exceptions_info = {}
-    condition_to_group = {}
+    try:
+        tree = ET.parse(xml_file)
+        root = tree.getroot()
+    except ET.ParseError as e:
+        print(f"Erreur lors de l'analyse du XML : {e}")
+        return None
 
-    # Étape 1 : Associer chaque <condition> à son <conditionGroup>
-    for group in root.findall(".//conditionGroup"):
-        group_id = group.attrib.get("id")
-        for condition in group.findall("condition"):
-            cond_id = condition.attrib.get("id")
-            if cond_id:
-                condition_to_group[cond_id] = group_id
+    graph = nx.DiGraph() 
 
-    # Étape 2 : Construire le graphe et détecter les exceptions
-    for elem in root.iter():
-        elem_id = elem.attrib.get("id")
-        if elem_id and elem.tag in ["fork", "condition"]:
-            graph.add_node(elem_id, type=elem.tag)
+    start_node = root.find(".//start")
+    if start_node is None:
+        print("Élément <start> introuvable.")
+        return None
 
-            for outcome in elem:
-                if outcome.tag in ["success", "failure"]:
-                    for jump in outcome.findall("jump"):
-                        dest = jump.attrib.get("location")
-                        if dest:
-                            graph.add_edge(elem_id, dest, label=outcome.tag)
+    start_id = start_node.get("id")
+    graph.add_node(start_id, type="start")
 
-                elif outcome.tag == "exception":
-                    graph.nodes[elem_id]["exception"] = outcome.attrib
-                    exceptions_info[elem_id] = {
-                        "exception": outcome.attrib,
-                        "jump_to": None,
-                        "path": [],
-                        "group": condition_to_group.get(elem_id)
-                    }
+    def explore_element(element, source_node_id, edge_label=None):
+        for child in element:
+            if child.tag == "fork":
+                fork_id = child.get("id")
+                graph.add_node(fork_id, type="fork")
+                graph.add_edge(source_node_id, fork_id, label=edge_label if edge_label else "")
 
-            # Ajouter le jump_to pour la condition
-            if elem.tag == "condition":
-                jump_elem = elem.find("success/jump")
-                if jump_elem is not None:
-                    dest = jump_elem.attrib.get("location")
-                    if dest:
-                        graph.add_edge(elem_id, dest, label="success")
-                        if elem_id in exceptions_info:
-                            exceptions_info[elem_id]["jump_to"] = dest
+                explore_fork_branches(child, fork_id)
 
-    # Étape 3 : Résoudre les chemins menant à chaque exception
-    for target in exceptions_info:
-        for source in graph.nodes:
+            elif child.tag == "condition":
+                condition_id = child.get("id")
+                graph.add_node(condition_id, type="condition")
+                graph.add_edge(source_node_id, condition_id, label=edge_label if edge_label else "")
+
+                explore_condition_branches(child, condition_id)
+
+            elif child.tag == "operation":
+                operation_id = child.get("id")
+                graph.add_node(operation_id, type="operation")
+                graph.add_edge(source_node_id, operation_id, label=edge_label if edge_label else "")
+
+                explore_element(child, operation_id)
+
+            elif child.tag == "jump":
+                target_location = child.get("location")
+                graph.add_node(target_location, type="jump")
+                graph.add_edge(source_node_id, target_location, label=edge_label if edge_label else "")
+
+            elif child.tag == "end":
+                end_id = child.get("id")
+                graph.add_node(end_id, type="end")
+                graph.add_edge(source_node_id, end_id, label=edge_label if edge_label else "")
+
+            elif child.tag == "conditionGroup":
+                condition_group_id = child.get("id")
+                graph.add_node(condition_group_id, type="conditionGroup")
+                graph.add_edge(source_node_id, condition_group_id, label=edge_label if edge_label else "")
+                explore_condition_group_branches(child, condition_group_id)
+
+            elif child.tag == "label":
+                label_id = child.get("id")
+                graph.add_node(label_id, type="label")
+                graph.add_edge(source_node_id, label_id, label=edge_label if edge_label else "")
+                explore_element(child, label_id)
+
+
+    def explore_fork_branches(fork_element, fork_id):
+        success_branch = fork_element.find("success")
+        failure_branch = fork_element.find("failure")
+
+        if success_branch is not None:
+            explore_element(success_branch, fork_id, edge_label="Success")
+        if failure_branch is not None:
+            explore_element(failure_branch, fork_id, edge_label="Failure")
+
+    def explore_condition_branches(condition_element, condition_id):
+        success_branch = condition_element.find("success")
+        if success_branch is not None:
+            explore_element(success_branch, condition_id, edge_label="Success")
+
+    def explore_condition_group_branches(condition_group_element, condition_group_id):
+        for child in condition_group_element:
+            if child.tag == "condition":
+                condition_id = child.get("id")
+                graph.add_node(condition_id, type="condition")
+                graph.add_edge(condition_group_id, condition_id)
+
+    explore_element(start_node, start_id)
+
+    return graph
+
+
+def extract_exceptions_and_paths_from_graph(graph, xml_file):
+
+    try:
+        tree = ET.parse(xml_file)
+        root = tree.getroot()
+    except ET.ParseError as e:
+        print(f"Erreur lors de l'analyse du XML : {e}")
+        return []
+
+    exceptions_data = []
+
+    def find_path_with_labels(graph, start, end):
+        def get_path(source, target, visited, path):
+            visited[source] = True
+            path.append(source)
+
             if source == target:
-                continue
-            try:
-                path = nx.shortest_path(graph, source=source, target=target)
-                exceptions_info[target]["path"].append(path)
-            except nx.NetworkXNoPath:
-                continue
+                return True
 
-    return exceptions_info
+            for neighbor, data in graph[source].items():
+                if not visited[neighbor]:
+                    if get_path(neighbor, target, visited, path):
+                        return True
+
+            path.pop()
+            visited[source] = False
+            return False
+
+        visited = {node: False for node in graph.nodes}
+        path = []
+        get_path(start, end, visited, path)
+        return " -> ".join(path) if path else None
+
+
+    for condition in root.findall(".//condition"):
+        exception_element = condition.find("exception")
+        if exception_element is not None:
+            condition_id = condition.get("id")
+            start_node_id = root.find(".//start").get("id")
+            path = find_path_with_labels(graph, start_node_id, condition_id)
+
+            exception_info = {
+                "condition_id": condition_id,
+                "condition_group": condition.get("conditionG", "None"),
+                "type": exception_element.get("type"),
+                "format": exception_element.get("format"),
+                "text": exception_element.get("text", "None"),
+                "path": path,
+            }
+            exceptions_data.append(exception_info)
+
+    return exceptions_data
+
 
 def main():
-    parser = argparse.ArgumentParser(description="Extract exception info from XML workflow")
-    parser.add_argument("xml_file", type=str, help="Path to the XML workflow file")
-    args = parser.parse_args()
+    xml_file = "C:/Users/madecco/Projects/egf-ml/app-xml-exception-tracer/ValidPayDocServer_wfd.xml"
+    graph = build_workflow_graph(xml_file)
 
-    xml_path = Path(args.xml_file)
-    if not xml_path.exists():
-        print(f"File not found: {xml_path}")
+    if graph is None:
+        print("Erreur lors de la construction du graphe.")
         return
 
-    result = parse_workflow_with_groups(xml_path)
-    pprint(result)
+    exceptions = extract_exceptions_and_paths_from_graph(graph, xml_file)
+
+    if exceptions:
+        print("\nExceptions trouvées :")
+        for exception in exceptions:
+            print("--------------------------------------")
+            print(f"Condition ID: {exception['condition_id']}")
+            print(f"Condition Group: {exception['condition_group']}")
+            print(f"Type: {exception['type']}")
+            print(f"Format: {exception['format']}")
+            print(f"Text: {exception['text']}")
+            print(f"Workflow Path: {exception['path']}")
+    else:
+        print("Aucune exception trouvée.")
+
+    print("--------------------------------------")
+    print('Exceptions: ' + str(len(exceptions)))
+
 
 if __name__ == "__main__":
     main()
