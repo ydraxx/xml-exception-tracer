@@ -13,13 +13,15 @@ from update_bitbucket import main as update_bitbucket
 
 
 def initialize_session_state():
-    """Initialize session state variables."""
-    if 'exceptions_loaded' not in st.session_state:
-        st.session_state.exceptions_loaded = False
-    if 'exceptions' not in st.session_state:
-        st.session_state.exceptions = []
-    if 'llm_results' not in st.session_state:
-        st.session_state.llm_results = defaultdict(str)
+    """Initialize session state variables using SessionStateManager."""
+    state = SessionStateManager()
+    state.init_bulk({
+        "exceptions_loaded": False,
+        "exceptions": [],
+        "llm_results": defaultdict(str),
+        "selected_groups": []
+    })
+    return state
 
 
 def get_xml_files(xml_path: str):
@@ -93,7 +95,6 @@ def show_ini_files(path_to_xml: str):
         else:
             result["eventGroups"]["__root__"]["events"] = [{k: v for k, v in event.attrib.items()} for event in event_list_section.findall("event")]
 
-
     # -------- PREFILTER LIST --------
     prefilters_section = root.find(".//preFilterList")
 
@@ -115,9 +116,9 @@ def extract_filter_values(conditions):
             if "==" in part:
                 filter_name, value = part.split("==")
                 filter_name = filter_name.strip()
-                value = value.strip().replace(";", "")  # Remove semicolon if present
+                value = value.strip().replace(";", "")
                 filter_values[filter_name].add(value)
-    return {k: sorted(list(v)) for k, v in filter_values.items()}  # Convert sets to sorted lists
+    return {k: sorted(list(v)) for k, v in filter_values.items()}
 
 
 def display_ini_result(result: dict):
@@ -125,7 +126,6 @@ def display_ini_result(result: dict):
         st.error(result["error"])
         return
 
-    # Display event groups
     st.subheader("Event List")
     if result["eventGroups"]:
         for group_name, group_data in result["eventGroups"].items():
@@ -142,24 +142,18 @@ def display_ini_result(result: dict):
     else:
         st.write("No event found.")
 
-
-    # Display prefilters grouped by entities
     st.subheader("Prefilter per entities")
     if result["preFiltersGroupedByEntities"]:
         for entity, conditions in result["preFiltersGroupedByEntities"].items():
             with st.expander(f"Entitie: `{entity}` ({len(conditions)} conditions)"):
 
-                # Extract filter values
                 filter_values = extract_filter_values(conditions)
                 filter_names = list(filter_values.keys())
                 num_filters = len(filter_names)
 
-                # Condition modifiée ici
                 all_single_condition = all(len(condition.split(',')) == 1 for condition in conditions)
 
-
-                if all_single_condition and num_filters > 0 :
-                    # Process and display results (simplified for single condition per filter)
+                if all_single_condition and num_filters > 0:
                     results_dict = {}
                     for condition in conditions:
                         parts = [part.strip() for part in condition.split(',')]
@@ -176,33 +170,27 @@ def display_ini_result(result: dict):
                         st.markdown(f"- **{filter_name}**: {', '.join(values)}")
                     continue 
 
-
                 cols = st.columns(num_filters)
                 filters = {}
-
-                # Display single-select input for each filter
                 for i, filter_name in enumerate(filter_names):
                     with cols[i]:
-                        filters[filter_name] = st.selectbox(  
+                        filters[filter_name] = st.selectbox(
                             f"{filter_name}:",
-                            options=[""] + filter_values[filter_name], 
-                            index=0,  
+                            options=[""] + filter_values[filter_name],
+                            index=0
                         )
 
-                # Process and display results
                 results = []
                 for condition in conditions:
-                    parts = [part.strip() for part in condition.split(',')] 
+                    parts = [part.strip() for part in condition.split(',')]
                     filtered_parts = []
-
-                    # Check if condition matches the selected filters
                     for part in parts:
                         if "==" in part:
                             filter_name, value = part.split("==")
                             filter_name = filter_name.strip()
                             value = value.strip().replace(";", "")
 
-                            if filter_name in filters and filters[filter_name] == value:  
+                            if filter_name in filters and filters[filter_name] == value:
                                 filtered_parts.append((filter_name, value))
 
                     if len(filtered_parts) > 0:
@@ -218,7 +206,6 @@ def display_ini_result(result: dict):
                                     other_filter_value = other_filter_value.strip().replace(";", "")
                                     possible_values[other_filter_name].append(other_filter_value)
 
-                            # Store the other filters with the possible values
                             for other_filter in other_filters:
                                 if other_filter in possible_values:
                                     values_str = ", ".join(possible_values[other_filter])
@@ -227,7 +214,6 @@ def display_ini_result(result: dict):
                                     output += f" **{other_filter} == All values**"
                         results.append(output)
 
-                # Combine results and display them in a single line
                 if results:
                     for other_filter in other_filters:
                         st.markdown(f"- **{other_filter}**: {', '.join(results)}")
@@ -236,7 +222,6 @@ def display_ini_result(result: dict):
 
 
 def display_exceptions(exceptions, selected_groups):
-    """Display exceptions based on selected groups."""
     grouped_exceptions = defaultdict(list)
     for exception in exceptions:
         condition_group = exception.get('condition_group', 'Autre')
@@ -254,177 +239,93 @@ def display_exceptions(exceptions, selected_groups):
 
 
 def display_exception_details(exception):
-    """Display the details for a single exception."""
+    state = SessionStateManager(namespace=f"{exception['condition_group']}/{exception['condition_id']}")
     
-    default_prompt = """You are acting as an AI assistant. Your primary task is to analyze and summarize the function "execute()" or any similar function within the provided code. 
-Begin by thoroughly reviewing all the code to understand its context.
-
-Focus on explaining the purpose and functionality of "execute()" and similar functions. 
-
-Offer a concise summary that highlights the key elements of the code, including any relevant actions performed by other functions that help clarify the overall objective of the code. 
-Avoid detailed explanations of other functions unless they contribute significant insight into the code's purpose.
-Don't put any code in your answer. 
-The code could contain two parts, try to understand the functions of the second one to explain the first one. 
-
-Your summary is destinated to non develop people, so don't use technical details. If the code includes a list of values, ensure to mention them in your explanation :"""
-
+    default_prompt = """You are acting as an AI assistant..."""  # Raccourci ici pour lisibilité
     model_names = ["gemini-2.0-flash-001", "claude-sonnet-4", "gpt-4o-mini-2024-07-18"]
     exception_id = exception['condition_id']
+
+    state.init("prompt_custom", False)
+    state.init("text_area_visible", False)
+    state.init("prompt_value", default_prompt)
+    state.init("model_name_selected", model_names[0])
+    state.init("show_code", False)
+    state.init("show_dep", False)
+
+    a, b, c = print_code(exception=exception['condition_id'])
+    exception_code, exception_name, code_dep = a, b, c
+    disabled = not bool(exception_code)
 
     with st.expander(f'**{exception["condition_id"]}**'):
         st.write(f"**Group:** {exception['condition_group']}  \n**Type:** {exception['type']}  \n**Format:** {exception['format']}  \n**Path:** {exception['path']}")
 
-        prompt_custom_key = f"prompt_custom_{exception['condition_group']}/{exception['condition_id']}"
-        if prompt_custom_key not in st.session_state:
-            st.session_state[prompt_custom_key] = False
+        col1, col2, col3, col4 = st.columns(4)
 
-        text_area_visible_key = f"text_area_visible_{exception['condition_group']}/{exception['condition_id']}"
-        if text_area_visible_key not in st.session_state:
-            st.session_state[text_area_visible_key] = False
-            
-        prompt_value_key = f"prompt_value_{exception['condition_group']}/{exception['condition_id']}"
-        if prompt_value_key not in st.session_state:
-            st.session_state[prompt_value_key] = default_prompt
-
-        model_name_key = f"model_name_selected_{exception['condition_group']}/{exception['condition_id']}"
-        if model_name_key not in st.session_state:
-            st.session_state[model_name_key] = model_names[0]
-
-        a, b, c = print_code(exception=exception['condition_id'])
-        exception_code, exception_name, code_dep = a, b, c
-
-        if not exception_code:
-            disabled = True
-        else:
-            disabled = False
-
-        show_code_key = f"show_code_{exception['condition_group']}/{exception['condition_id']}"
-        if show_code_key not in st.session_state:
-            st.session_state[show_code_key] = False
-
-        show_dep_key = f"show_dep_{exception['condition_group']}/{exception['condition_id']}"
-        if show_dep_key not in st.session_state:
-            st.session_state[show_dep_key] = False
-
-
-        # CASE WHEN CODE EXCEPTION IS NOT FOUND
-        if not a:
-            service_folder = exception["condition_id"].split('.')[0]
-            service_folder, code_directory = find_directory(service_folder)
-            files_folder = os.path.join(xml_cfg['XML_PATH'], "codes", code_directory, service_folder)
-            if os.path.exists(files_folder):
-                files = [f for f in os.listdir(files_folder)
-                       if os.path.isfile(os.path.join(files_folder, f )) and 
-                       os.path.join(files_folder, f ).endswith(".cc")]
-                files = [''] + files
-                replace_exception_name = st.selectbox(label="No exception code found. Select the right code.", 
-                                                  options=files, 
-                                                  key=f"disabled_{exception['condition_group']}/{exception['condition_id']}_selectbox")
-                if replace_exception_name != '':
-                    exception_id = exception['condition_id'].split('.')[0] + '.' + replace_exception_name.split('_')[1].split('.')[0]
-                    exception_code, exception_name, code_dep = replace_print_code(exception=exception_id)
-            if not exception_code:
-                disabled = True
-            else:
-                disabled = False
-
-
-        col1, col2, col3, col4 = st.columns(4) 
-
-        # BUTTON CUSTOM PROMPT
         with col1:
-            if st.button(label='Custom prompt', key=f"prompt_{exception['condition_group']}/{exception['condition_id']}_button",
-                         use_container_width=True, disabled=disabled):
-                st.session_state[prompt_custom_key] = not st.session_state[prompt_custom_key]
+            if st.button("Custom prompt", disabled=disabled):
+                state.toggle("prompt_custom")
 
-        # BUTTON SHOW CODE
-        with col2: 
-            if st.button(label='Show exception code', key=f"dep_{exception['condition_group']}/{exception['condition_id']}_button",
-                         use_container_width=True, disabled=disabled):
-                st.session_state[show_code_key] = not st.session_state[show_code_key]
+        with col2:
+            if st.button("Show exception code", disabled=disabled):
+                state.toggle("show_code")
 
-        # BUTTON SHOW DEPENDENCIES
         with col3:
-            if st.button(label='Show includes code', key=f"codes_{exception['condition_group']}/{exception['condition_id']}_button",
-                         use_container_width=True, disabled=disabled):
-                st.session_state[show_dep_key] = not st.session_state[show_dep_key]
+            if st.button("Show includes code", disabled=disabled):
+                state.toggle("show_dep")
 
-        # BUTTON AI
         with col4:
-            if st.button(label='Ask AI', key=f"AI_{exception['condition_group']}/{exception['condition_id']}_button", 
-                         use_container_width=True, disabled=disabled):
-                result = llm_request(exception=exception_id, 
-                                     prompt_struct=st.session_state[prompt_value_key],
-                                     model_name=st.session_state[model_name_key])
-                st.session_state.llm_results[exception['condition_id']] = result 
+            if st.button("Ask AI", disabled=disabled):
+                result = llm_request(
+                    exception=exception_id,
+                    prompt_struct=state.get("prompt_value"),
+                    model_name=state.get("model_name_selected")
+                )
+                SessionStateManager().get("llm_results")[exception['condition_id']] = result
 
-        # RESULT CUSTOM PROMPT
-        if st.session_state[prompt_custom_key]:
-            prompt_struct_key = f"input_{exception['condition_group']}/{exception['condition_id']}"
-            
-            if st.button(label="Change prompt", key=f"change_prompt_{exception['condition_group']}/{exception['condition_id']}_button"):
-                st.session_state[text_area_visible_key] = not st.session_state[text_area_visible_key]
-            
-            st.session_state[model_name_key] = st.selectbox(
-                label="Model:", 
-                options=model_names, 
-                key=f"model_name_{exception['condition_group']}/{exception['condition_id']}"
-            )
+        if state.get("prompt_custom"):
+            if st.button("Change prompt"):
+                state.toggle("text_area_visible")
 
-            if st.session_state[text_area_visible_key]:
-                st.session_state[prompt_value_key] = st.text_area(label="Prompt:", value=st.session_state[prompt_value_key], key=prompt_struct_key)
+            state.set("model_name_selected", st.selectbox("Model:", model_names))
+            
+            if state.get("text_area_visible"):
+                state.set("prompt_value", st.text_area("Prompt:", value=state.get("prompt_value")))
             else:
-                st.code(f"{st.session_state[prompt_value_key]}  \n\nPart 1:  \nFile: {exception_name}  \nCode:  \n{exception_code}  \n\nPart 2:  \nCode:  \n{code_dep}", 
-                        language='markdown')
+                st.code(f"{state.get('prompt_value')}  \n\nPart 1:  \nFile: {exception_name}  \nCode:  \n{exception_code}  \n\nPart 2:  \nCode:  \n{code_dep}", language='markdown')
 
-        # RESULT SHOW CODE
-        if st.session_state[show_code_key]:
+        if state.get("show_code"):
             st.code(f"File: {exception_name}  \nCode:  \n{exception_code}", language='cpp')
 
-        # RESULT SHOW DEP
-        if st.session_state[show_dep_key]:
+        if state.get("show_dep"):
             st.code(code_dep, language='cpp')
 
-        # IA RESULT
-        if exception['condition_id'] in st.session_state.llm_results:
-            st.write(st.session_state.llm_results[exception['condition_id']])
+        if exception['condition_id'] in SessionStateManager().get("llm_results"):
+            st.write(SessionStateManager().get("llm_results")[exception['condition_id']])
 
 
 def main():
-    st.set_page_config(layout="wide", 
-                       page_title='AIDoc', 
-						page_icon=app_cfg['LOGO_PATH']
-                       )
-    
+    st.set_page_config(layout="wide", page_title='AIDoc', page_icon=app_cfg['LOGO_PATH'])
     st.logo(image=app_cfg['LOGO_PATH'])
 
-    st.markdown(
-        """
+    st.markdown("""
         <style>
-        [data-testid="stExpander"] {
-            background-color: #F5F7FF;
-        }
-        img[data-testid="stLogo"] {
-            height: 7.5rem;
-        }
-        [data-testid="stDecoration"] {background: #0059ff;}
+        [data-testid="stExpander"] { background-color: #F5F7FF; }
+        img[data-testid="stLogo"] { height: 7.5rem; }
+        [data-testid="stDecoration"] { background: #0059ff; }
         </style>
-        """,
-        unsafe_allow_html=True
-    )
+    """, unsafe_allow_html=True)
 
     col1, col2, col3, col4, col5, col6, col7, col8 = st.columns([1, 1, 1, 1, 1, 1, 1, 1])
     with col8:
         st.button('Update code', key='button2', use_container_width=True, on_click=update_bitbucket)
-    
+
     st.title('STP Workflow Tracer')
 
-    initialize_session_state()
-    
+    state = initialize_session_state()
+
     files = get_xml_files(xml_cfg['XML_PATH'])
     file_map = {os.path.basename(file).split('_cfg')[0]: file for file in files}
-
-    selected_file_name = st.selectbox("Workflow",  list(file_map.keys()))
+    selected_file_name = st.selectbox("Workflow", list(file_map.keys()))
     xml_selected = file_map[selected_file_name]
 
     workflow_name, workflow_diagram, initialization = get_workflow_info(xml_file_path=xml_selected)
@@ -432,41 +333,34 @@ def main():
     wfd_path = os.path.join(xml_cfg['XML_PATH'], workflow_diagram)
 
     result = show_ini_files(initialization_path)
-    
-    # Initialization file
     with st.expander('Entities and conditions', expanded=False):
         display_ini_result(result)
 
     if st.button('Get exceptions', key='button1'):
         graph = build_workflow_graph(xml_file=wfd_path)
-        st.session_state.exceptions = extract_exceptions(graph=graph, xml_file=wfd_path)
-        st.session_state.exceptions_loaded = True
-        all_groups = set(exception.get('condition_group', 'Autre') for exception in st.session_state.exceptions)
-        st.session_state.selected_groups = list(all_groups)
+        state.set("exceptions", extract_exceptions(graph=graph, xml_file=wfd_path))
+        state.set("exceptions_loaded", True)
+        all_groups = set(exc.get('condition_group', 'Autre') for exc in state.get("exceptions"))
+        state.set("selected_groups", list(all_groups))
 
-    # Side bar
     with st.sidebar:
-        if st.session_state.exceptions_loaded:
+        if state.get("exceptions_loaded"):
             st.header("Exception group")
-            exceptions = st.session_state.exceptions
+            exceptions = state.get("exceptions")
             if exceptions:
-                all_groups = sorted(list(set(exception.get('condition_group', 'Autre') for exception in exceptions)))
-                
-                # Create checkboxes for each exception group
+                all_groups = sorted(set(exc.get('condition_group', 'Autre') for exc in exceptions))
                 for group in all_groups:
                     group_display = "No exception group" if group == 'None' else group
-                    is_selected = st.checkbox(group_display, value=(group in st.session_state.selected_groups))
-                    
-                    if is_selected and group not in st.session_state.selected_groups:
-                        st.session_state.selected_groups.append(group)
-                    elif not is_selected and group in st.session_state.selected_groups:
-                        st.session_state.selected_groups.remove(group)
+                    is_selected = st.checkbox(group_display, value=(group in state.get("selected_groups")))
+                    if is_selected and group not in state.get("selected_groups"):
+                        state.get("selected_groups").append(group)
+                    elif not is_selected and group in state.get("selected_groups"):
+                        state.get("selected_groups").remove(group)
 
-    # WorkFlow Diagram
-    if st.session_state.exceptions_loaded:
-        exceptions = st.session_state.exceptions
+    if state.get("exceptions_loaded"):
+        exceptions = state.get("exceptions")
         if exceptions:
-            display_exceptions(exceptions, st.session_state.selected_groups)
+            display_exceptions(exceptions, state.get("selected_groups"))
         else:
             st.write("0 exception found.")
 
